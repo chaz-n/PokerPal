@@ -40,5 +40,3 @@ npm test
 Covers blind posting, turn order, min-raise rules, side pots, split pots,
 heads-up play, and a 200-hand randomized simulation asserting chips are never
 created or destroyed.
-# PokerPal
-# PokerPal

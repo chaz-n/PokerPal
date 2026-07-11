@@ -32,11 +32,13 @@ function createGame(hostName, settings = {}) {
       startingStack: clampInt(settings.startingStack, 1, 1000000, 1000),
       smallBlind: clampInt(settings.smallBlind, 1, 100000, 5),
       bigBlind: clampInt(settings.bigBlind, 1, 200000, 10),
+      turnTimer: clampInt(settings.turnTimer, 0, 300, 0), // seconds; 0 = off
     },
     players: [],
     stage: 'lobby', // lobby | preflop | flop | turn | river | showdown | hand_over
     handNumber: 0,
     dealerId: null,
+    nextDealerId: null, // host override: who gets the button next hand
     sbId: null,
     bbId: null,
     actorId: null,
@@ -67,6 +69,8 @@ function addPlayer(game, name, isHost = false) {
     name,
     isHost,
     chips: game.settings.startingStack,
+    buyIn: game.settings.startingStack,
+    handsWon: 0,
     connected: true,
     // per-hand state
     inHand: false,
@@ -153,6 +157,33 @@ function potTotal(game) {
 
 // ---------------------------------------------------------------- hands
 
+// Who will be dealer / small blind / big blind when the next hand starts:
+// the host's override if set, otherwise the button rotates one seat.
+function nextPositions(game) {
+  const isEligible = (p) => p.chips > 0;
+  const eligible = game.players.filter(isEligible);
+  if (eligible.length < 2) return null;
+
+  let dealer = null;
+  if (game.nextDealerId) {
+    const pinned = getPlayer(game, game.nextDealerId);
+    if (pinned && isEligible(pinned)) dealer = pinned;
+  }
+  if (!dealer) {
+    dealer = game.dealerId ? nextAfterId(game, game.dealerId, isEligible) : eligible[0];
+  }
+
+  let sb, bb;
+  if (eligible.length === 2) {
+    sb = dealer; // heads-up: button posts the small blind
+    bb = nextAfterId(game, dealer.id, isEligible);
+  } else {
+    sb = nextAfterId(game, dealer.id, isEligible);
+    bb = nextAfterId(game, sb.id, isEligible);
+  }
+  return { dealerId: dealer.id, sbId: sb.id, bbId: bb.id };
+}
+
 function startHand(game, playerId) {
   if (!isActingHost(game, playerId)) throw new GameError('Only the host can start a hand.');
   if (game.stage !== 'lobby' && game.stage !== 'hand_over') {
@@ -176,20 +207,12 @@ function startHand(game, playerId) {
     p.lastAction = null;
   }
 
-  // Rotate the button to the next player still holding chips.
-  const dealer = game.dealerId
-    ? nextAfterId(game, game.dealerId, (p) => p.inHand)
-    : eligible[0];
-  game.dealerId = dealer.id;
-
-  let sb, bb;
-  if (eligible.length === 2) {
-    sb = dealer; // heads-up: button posts the small blind
-    bb = nextAfterId(game, dealer.id, (p) => p.inHand);
-  } else {
-    sb = nextAfterId(game, dealer.id, (p) => p.inHand);
-    bb = nextAfterId(game, sb.id, (p) => p.inHand);
-  }
+  const pos = nextPositions(game);
+  game.dealerId = pos.dealerId;
+  game.nextDealerId = null;
+  const dealer = getPlayer(game, pos.dealerId);
+  const sb = getPlayer(game, pos.sbId);
+  const bb = getPlayer(game, pos.bbId);
   game.sbId = sb.id;
   game.bbId = bb.id;
   pay(game, sb, game.settings.smallBlind);
@@ -225,26 +248,28 @@ function someoneCanRespond(game) {
 
 // ---------------------------------------------------------------- actions
 
-function applyAction(game, playerId, action, byHost = false) {
+// via: 'self' (the player), 'host' (acting for a disconnected player), 'timeout' (turn timer)
+function applyAction(game, playerId, action, via = 'self') {
   if (!isBettingStage(game)) throw new GameError('No betting round is active.');
   const player = getPlayer(game, playerId);
   if (!player) throw new GameError('Player not found.');
   if (game.actorId !== player.id) throw new GameError("It's not your turn.");
-  if (byHost && player.connected) throw new GameError('Player is connected — they act for themselves.');
+  if (via === 'host' && player.connected) throw new GameError('Player is connected — they act for themselves.');
 
   const type = action && action.type;
   const toCall = game.currentBet - player.betThisRound;
+  const suffix = via === 'host' ? ' (by host — disconnected)' : via === 'timeout' ? ' (time ran out)' : '';
 
   if (type === 'fold') {
     player.inHand = false;
     player.acted = true;
     player.lastAction = 'Fold';
-    log(game, byHost ? `${player.name} folded (by host — disconnected).` : `${player.name} folds.`);
+    log(game, `${player.name} folds${suffix}.`);
   } else if (type === 'check') {
     if (toCall > 0) throw new GameError(`You must call ${toCall} (or fold/raise).`);
     player.acted = true;
     player.lastAction = 'Check';
-    log(game, `${player.name} checks.`);
+    log(game, `${player.name} checks${suffix}.`);
   } else if (type === 'call') {
     if (toCall <= 0) throw new GameError('Nothing to call — you can check.');
     const paid = pay(game, player, toCall);
@@ -252,7 +277,7 @@ function applyAction(game, playerId, action, byHost = false) {
     player.lastAction = player.allIn ? `All-in ${player.betThisRound}` : `Call ${paid}`;
     log(game, `${player.name} calls ${paid}${player.allIn ? ' and is all-in' : ''}.`);
   } else if (type === 'raise') {
-    if (byHost) throw new GameError('Host can only fold or check for a disconnected player.');
+    if (via !== 'self') throw new GameError('Host can only fold or check for a disconnected player.');
     const raiseTo = clampInt(action.amount, 1, 100000000, 0);
     const maxTo = player.betThisRound + player.chips;
     const minTo = Math.min(game.currentBet + game.minRaise, maxTo);
@@ -281,6 +306,14 @@ function applyAction(game, playerId, action, byHost = false) {
   return game;
 }
 
+// Turn timer expired: check if possible, otherwise fold.
+function timeoutAction(game) {
+  if (!isBettingStage(game) || !game.actorId) return game;
+  const player = getPlayer(game, game.actorId);
+  const toCall = game.currentBet - player.betThisRound;
+  return applyAction(game, player.id, { type: toCall > 0 ? 'fold' : 'check' }, 'timeout');
+}
+
 function resolveAfterAction(game) {
   const remaining = game.players.filter((p) => p.inHand);
   if (remaining.length === 1) {
@@ -288,6 +321,7 @@ function resolveAfterAction(game) {
     const winner = remaining[0];
     const amount = potTotal(game);
     winner.chips += amount;
+    winner.handsWon += 1;
     game.handResult = [`${winner.name} wins ${amount} — everyone else folded.`];
     log(game, `${winner.name} wins ${amount} (everyone folded).`);
     endHand(game);
@@ -427,6 +461,13 @@ function potLabel(game, index) {
 function maybeFinishShowdown(game) {
   if (game.stage !== 'showdown') return;
   if (game.pots.every((p) => p.awarded)) {
+    // Count the hand as won for anyone who took a contested pot
+    // (an auto-returned uncalled bet isn't a win).
+    const winners = new Set();
+    for (const pot of game.pots) {
+      if (pot.eligibleIds.length > 1) pot.winners.forEach((id) => winners.add(id));
+    }
+    for (const id of winners) getPlayer(game, id).handsWon += 1;
     game.handResult = game.pots.map((pot, i) => {
       const names = pot.winners.map((id) => getPlayer(game, id).name).join(', ');
       return `${names} — ${pot.amount} (${potLabel(game, i)})`;
@@ -457,7 +498,93 @@ function rebuy(game, playerId, targetId) {
   const target = getPlayer(game, targetId);
   if (!target) throw new GameError('Player not found.');
   target.chips += game.settings.startingStack;
+  target.buyIn += game.settings.startingStack;
   log(game, `${target.name} rebuys for ${game.settings.startingStack}.`);
+  touch(game);
+  return game;
+}
+
+// Host can retune blinds and the turn timer mid-game. Blinds are read when a
+// hand starts, so mid-hand changes simply apply from the next hand.
+function updateSettings(game, playerId, patch = {}) {
+  if (!isActingHost(game, playerId)) throw new GameError('Only the host can change settings.');
+  const s = game.settings;
+  const smallBlind = clampInt(patch.smallBlind, 1, 100000, s.smallBlind);
+  const bigBlind = clampInt(patch.bigBlind, 1, 200000, s.bigBlind);
+  const turnTimer = clampInt(patch.turnTimer, 0, 300, s.turnTimer);
+  if (bigBlind < smallBlind) throw new GameError('Big blind must be at least the small blind.');
+
+  const blindsChanged = smallBlind !== s.smallBlind || bigBlind !== s.bigBlind;
+  const timerChanged = turnTimer !== s.turnTimer;
+  s.smallBlind = smallBlind;
+  s.bigBlind = bigBlind;
+  s.turnTimer = turnTimer;
+  if (blindsChanged) {
+    const midHand = game.stage !== 'lobby' && game.stage !== 'hand_over';
+    log(game, `Blinds are now ${smallBlind}/${bigBlind}${midHand ? ' (from the next hand)' : ''}.`);
+  }
+  if (timerChanged) {
+    log(game, turnTimer ? `Turn timer set to ${turnTimer}s.` : 'Turn timer turned off.');
+  }
+  touch(game);
+  return game;
+}
+
+// Host hands control of the game to another player.
+function transferHost(game, hostId, targetId) {
+  if (!isActingHost(game, hostId)) throw new GameError('Only the host can transfer hosting.');
+  const target = getPlayer(game, targetId);
+  if (!target) throw new GameError('Player not found.');
+  if (target.isHost) return game;
+  for (const p of game.players) p.isHost = false;
+  target.isHost = true;
+  log(game, `${target.name} is now the host.`);
+  touch(game);
+  return game;
+}
+
+// Host reorders seats (to match the physical table). Between hands only.
+function movePlayer(game, hostId, targetId, direction) {
+  if (!isActingHost(game, hostId)) throw new GameError('Only the host can change the seating.');
+  if (isBettingStage(game) || game.stage === 'showdown') {
+    throw new GameError('You can only change seats between hands.');
+  }
+  const from = game.players.findIndex((p) => p.id === targetId);
+  if (from === -1) throw new GameError('Player not found.');
+  const to = from + (direction < 0 ? -1 : 1);
+  if (to < 0 || to >= game.players.length) return game; // already at the edge
+  const [player] = game.players.splice(from, 1);
+  game.players.splice(to, 0, player);
+  touch(game);
+  return game;
+}
+
+// Host hands the button to a specific player for the next hand.
+function setNextDealer(game, hostId, targetId) {
+  if (!isActingHost(game, hostId)) throw new GameError('Only the host can move the button.');
+  if (isBettingStage(game) || game.stage === 'showdown') {
+    throw new GameError('You can only move the button between hands.');
+  }
+  const target = getPlayer(game, targetId);
+  if (!target) throw new GameError('Player not found.');
+  if (target.chips <= 0) throw new GameError('That player has no chips.');
+  game.nextDealerId = targetId;
+  log(game, `${target.name} will have the button next hand.`);
+  touch(game);
+  return game;
+}
+
+function kickPlayer(game, hostId, targetId) {
+  if (!isActingHost(game, hostId)) throw new GameError('Only the host can remove a player.');
+  if (hostId === targetId) throw new GameError('Use "Leave game" to remove yourself.');
+  if (isBettingStage(game) || game.stage === 'showdown') {
+    throw new GameError('You can only remove players between hands.');
+  }
+  const target = getPlayer(game, targetId);
+  if (!target) throw new GameError('Player not found.');
+  game.players = game.players.filter((p) => p.id !== targetId);
+  if (target.isHost && game.players.length) game.players[0].isHost = true;
+  log(game, `${target.name} was removed by the host.`);
   touch(game);
   return game;
 }
@@ -485,11 +612,14 @@ function publicState(game) {
     sbId: game.sbId,
     bbId: game.bbId,
     actorId: game.actorId,
+    actorDeadline: game.actorDeadline || null,
     currentBet: game.currentBet,
     minRaiseTo: game.currentBet + game.minRaise,
     potCollected: potCollected(game),
     potTotal: potTotal(game),
     ranOut: game.ranOut,
+    next:
+      game.stage === 'lobby' || game.stage === 'hand_over' ? nextPositions(game) : null,
     pots: game.pots,
     handResult: game.handResult,
     prompt: isBettingStage(game) ? STAGE_PROMPTS[game.stage] : null,
@@ -502,6 +632,8 @@ function publicState(game) {
       name: p.name,
       isHost: p.isHost,
       chips: p.chips,
+      buyIn: p.buyIn,
+      handsWon: p.handsWon,
       connected: p.connected,
       inHand: p.inHand,
       allIn: p.allIn,
@@ -520,8 +652,14 @@ module.exports = {
   getPlayer,
   startHand,
   applyAction,
+  timeoutAction,
   awardPot,
   rebuy,
+  updateSettings,
+  transferHost,
+  movePlayer,
+  setNextDealer,
+  kickPlayer,
   leaveGame,
   publicState,
   isActingHost,

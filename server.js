@@ -11,20 +11,88 @@ const io = new Server(server);
 app.use(express.static(path.join(__dirname, 'public')));
 
 const games = new Map(); // code -> game
+const MAX_GAMES = 500;
 
 // Drop games idle for 12 hours.
 setInterval(() => {
   const cutoff = Date.now() - 12 * 60 * 60 * 1000;
   for (const [code, game] of games) {
-    if (game.lastActivity < cutoff) games.delete(code);
+    if (game.lastActivity < cutoff) removeGame(code);
   }
 }, 60 * 60 * 1000).unref();
+
+function removeGame(code) {
+  const timer = timers.get(code);
+  if (timer) clearTimeout(timer.handle);
+  timers.delete(code);
+  games.delete(code);
+}
+
+// --- turn timer (runs server-side so it fires even if every phone is locked) ---
+const timers = new Map(); // code -> {key, handle}
+
+function armTimer(game) {
+  // Re-arm only when the situation changed; unrelated broadcasts
+  // (someone joining, a disconnect) must not reset the countdown.
+  const key = `${game.handNumber}:${game.stage}:${game.actorId}:${game.settings.turnTimer}`;
+  const current = timers.get(game.code);
+  if (current && current.key === key) return;
+  if (current) clearTimeout(current.handle);
+  timers.delete(game.code);
+  game.actorDeadline = null;
+
+  if (!game.settings.turnTimer || !G.isBettingStage(game) || !game.actorId) return;
+  const ms = game.settings.turnTimer * 1000;
+  game.actorDeadline = Date.now() + ms;
+  const handle = setTimeout(() => {
+    timers.delete(game.code);
+    try {
+      G.timeoutAction(game);
+    } catch (err) {
+      console.error(err);
+    }
+    broadcast(game);
+  }, ms + 500); // slight grace so the on-screen countdown hits 0 first
+  timers.set(game.code, { key, handle });
+}
+
+// --- per-IP rate limiting for lobby actions (makes code brute-forcing impractical) ---
+const buckets = new Map(); // "ip:action" -> {count, resetAt}
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, b] of buckets) {
+    if (now > b.resetAt) buckets.delete(key);
+  }
+}, 5 * 60 * 1000).unref();
+
+function clientIp(socket) {
+  if (process.env.TRUST_PROXY) {
+    const fwd = socket.handshake.headers['x-forwarded-for'];
+    if (fwd) return String(fwd).split(',')[0].trim();
+  }
+  return socket.handshake.address;
+}
+
+function rateLimit(socket, action, max, windowMs) {
+  const key = `${clientIp(socket)}:${action}`;
+  const now = Date.now();
+  let b = buckets.get(key);
+  if (!b || now > b.resetAt) {
+    b = { count: 0, resetAt: now + windowMs };
+    buckets.set(key, b);
+  }
+  b.count += 1;
+  if (b.count > max) {
+    throw new G.GameError("You're doing that too often — wait a minute and try again.");
+  }
+}
 
 function room(code) {
   return `game:${code}`;
 }
 
 function broadcast(game) {
+  armTimer(game);
   io.to(room(game.code)).emit('state', G.publicState(game));
 }
 
@@ -61,6 +129,8 @@ io.on('connection', (socket) => {
   socket.on(
     'create',
     safe(socket, ({ name, settings } = {}) => {
+      rateLimit(socket, 'create', 6, 10 * 60 * 1000);
+      if (games.size >= MAX_GAMES) throw new G.GameError('Server is full right now — try again later.');
       const { game, player } = G.createGame(name, settings || {});
       games.set(game.code, game);
       bind(socket, game, player);
@@ -72,6 +142,7 @@ io.on('connection', (socket) => {
   socket.on(
     'join',
     safe(socket, ({ code, name } = {}) => {
+      rateLimit(socket, 'join', 15, 60 * 1000);
       const game = games.get(String(code || '').trim().toUpperCase());
       if (!game) throw new G.GameError('No game found with that code.');
       const player = G.addPlayer(game, name);
@@ -84,6 +155,7 @@ io.on('connection', (socket) => {
   socket.on(
     'rejoin',
     safe(socket, ({ code, playerId, token } = {}) => {
+      rateLimit(socket, 'rejoin', 30, 60 * 1000);
       const game = games.get(String(code || '').trim().toUpperCase());
       const player = game && G.getPlayer(game, playerId);
       if (!game || !player || player.token !== token) {
@@ -122,7 +194,7 @@ io.on('connection', (socket) => {
       const { game, player } = currentGame(socket);
       if (!G.isActingHost(game, player.id)) throw new G.GameError('Only the host can do that.');
       if (type !== 'fold' && type !== 'check') throw new G.GameError('Host can only fold or check for a player.');
-      G.applyAction(game, game.actorId, { type }, true);
+      G.applyAction(game, game.actorId, { type }, 'host');
       broadcast(game);
     })
   );
@@ -146,6 +218,55 @@ io.on('connection', (socket) => {
   );
 
   socket.on(
+    'kick',
+    safe(socket, ({ targetId } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.kickPlayer(game, player.id, targetId);
+      if (game.players.length === 0) {
+        removeGame(game.code);
+      } else {
+        broadcast(game);
+      }
+    })
+  );
+
+  socket.on(
+    'transfer_host',
+    safe(socket, ({ targetId } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.transferHost(game, player.id, targetId);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'move_player',
+    safe(socket, ({ targetId, direction } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.movePlayer(game, player.id, targetId, Number(direction) || 1);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'set_dealer',
+    safe(socket, ({ targetId } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.setNextDealer(game, player.id, targetId);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'update_settings',
+    safe(socket, (patch = {}) => {
+      const { game, player } = currentGame(socket);
+      G.updateSettings(game, player.id, patch);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
     'leave',
     safe(socket, () => {
       const { game, player } = currentGame(socket);
@@ -155,7 +276,7 @@ io.on('connection', (socket) => {
       socket.data.playerId = null;
       socket.emit('left');
       if (game.players.length === 0) {
-        games.delete(game.code);
+        removeGame(game.code);
       } else {
         broadcast(game);
       }

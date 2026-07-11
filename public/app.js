@@ -50,6 +50,14 @@ socket.on('left', () => {
 });
 
 socket.on('state', (s) => {
+  // If we're no longer in the player list, the host removed us.
+  if (session && !s.players.some((p) => p.id === session.playerId)) {
+    saveSession(null);
+    state = null;
+    show('home');
+    toast('You were removed from the game.');
+    return;
+  }
   state = s;
   render();
 });
@@ -57,6 +65,25 @@ socket.on('state', (s) => {
 socket.on('game_error', ({ message }) => toast(message));
 
 // ---------------------------------------------------------------- home screen
+
+// ---------------------------------------------------------------- theme
+
+const THEME_LABELS = { auto: '◐ Auto', light: '☀ Light', dark: '● Dark' };
+let theme = localStorage.getItem('pokerpal-theme') || 'auto';
+
+function applyTheme() {
+  if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', theme);
+  $('theme-btn').textContent = THEME_LABELS[theme];
+}
+
+$('theme-btn').addEventListener('click', () => {
+  const order = ['auto', 'light', 'dark'];
+  theme = order[(order.indexOf(theme) + 1) % order.length];
+  localStorage.setItem('pokerpal-theme', theme);
+  applyTheme();
+});
+applyTheme();
 
 const savedName = localStorage.getItem('pokerpal-name');
 if (savedName) $('name-input').value = savedName;
@@ -76,6 +103,7 @@ $('create-btn').addEventListener('click', () => {
       startingStack: Number($('set-stack').value),
       smallBlind: Number($('set-sb').value),
       bigBlind: Number($('set-bb').value),
+      turnTimer: Number($('set-timer').value),
     },
   });
 });
@@ -96,7 +124,10 @@ $('lobby-leave-btn').addEventListener('click', leave);
 $('table-leave-btn').addEventListener('click', leave);
 
 function leave() {
-  if (confirm('Leave this game?')) socket.emit('leave');
+  const msg = amHost()
+    ? 'Leave this game? Hosting passes to the first seat unless you make someone else host first (♛).'
+    : 'Leave this game?';
+  if (confirm(msg)) socket.emit('leave');
 }
 
 $('btn-fold').addEventListener('click', () => socket.emit('action', { type: 'fold' }));
@@ -139,6 +170,33 @@ $('raise-pot').addEventListener('click', () => {
 $('host-force-fold').addEventListener('click', () => socket.emit('host_action', { type: 'fold' }));
 $('host-force-check').addEventListener('click', () => socket.emit('host_action', { type: 'check' }));
 
+$('apply-settings').addEventListener('click', () => {
+  socket.emit('update_settings', {
+    smallBlind: Number($('live-sb').value),
+    bigBlind: Number($('live-bb').value),
+    turnTimer: Number($('live-timer').value),
+  });
+  $('host-settings').open = false;
+});
+
+// Tick all visible countdowns twice a second.
+setInterval(() => {
+  if (!state || !state.actorDeadline) return;
+  const secs = Math.max(0, Math.ceil((state.actorDeadline - Date.now()) / 1000));
+  document.querySelectorAll('.countdown').forEach((el) => {
+    el.textContent = ` ${secs}s`;
+  });
+}, 500);
+
+function countdownSpan() {
+  const span = document.createElement('span');
+  span.className = 'countdown';
+  if (state.actorDeadline) {
+    span.textContent = ` ${Math.max(0, Math.ceil((state.actorDeadline - Date.now()) / 1000))}s`;
+  }
+  return span;
+}
+
 function setRaise(v) {
   const clamped = Math.max(minRaiseTo(), Math.min(maxRaiseTo(), Math.floor(v)));
   $('raise-amount').value = clamped;
@@ -176,8 +234,75 @@ function amHost() {
 
 function render() {
   if (!state) return show('home');
+  turnAlert();
+  keepAwake();
   if (state.stage === 'lobby') return renderLobby();
   renderTable();
+}
+
+// Buzz the phone and flag the tab title when it becomes your turn.
+let wasMyTurn = false;
+function turnAlert() {
+  const myTurn = state.actorId != null && state.actorId === myId();
+  if (myTurn && !wasMyTurn && navigator.vibrate) navigator.vibrate([150, 75, 150]);
+  wasMyTurn = myTurn;
+  document.title = myTurn ? '● Your turn — PokerPal' : 'PokerPal — virtual chips for real cards';
+}
+
+// Keep the screen on during a game (needs HTTPS; silently unavailable otherwise).
+let wakeLock = null;
+async function keepAwake() {
+  if (!('wakeLock' in navigator) || wakeLock || document.visibilityState !== 'visible') return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => {
+      wakeLock = null;
+    });
+  } catch {
+    /* denied (e.g. battery saver) — not critical */
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && state) keepAwake();
+});
+
+function seatControls(p) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(seatBtn('↑', 'Move up', () => socket.emit('move_player', { targetId: p.id, direction: -1 })));
+  frag.appendChild(seatBtn('↓', 'Move down', () => socket.emit('move_player', { targetId: p.id, direction: 1 })));
+  if (p.chips > 0 && !(state.next && state.next.dealerId === p.id)) {
+    frag.appendChild(seatBtn('D', 'Give the button next hand', () => socket.emit('set_dealer', { targetId: p.id })));
+  }
+  if (!p.isHost && p.id !== myId()) {
+    frag.appendChild(
+      seatBtn('♛', 'Make host', () => {
+        if (confirm(`Make ${p.name} the host? They'll take over running the game.`)) {
+          socket.emit('transfer_host', { targetId: p.id });
+        }
+      })
+    );
+  }
+  return frag;
+}
+
+function seatBtn(label, title, onClick) {
+  const b = document.createElement('button');
+  b.className = 'btn seat';
+  b.textContent = label;
+  b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function kickButton(p) {
+  const btn = document.createElement('button');
+  btn.className = 'btn kick';
+  btn.textContent = '✕';
+  btn.title = `Remove ${p.name}`;
+  btn.addEventListener('click', () => {
+    if (confirm(`Remove ${p.name} from the game?`)) socket.emit('kick', { targetId: p.id });
+  });
+  return btn;
 }
 
 function renderLobby() {
@@ -190,14 +315,24 @@ function renderLobby() {
   for (const p of state.players) {
     const li = document.createElement('li');
     const left = document.createElement('span');
-    left.textContent = p.name + (p.id === myId() ? ' (you)' : '');
+    left.className = 'p-who';
+    left.appendChild(document.createTextNode(p.name + (p.id === myId() ? ' (you)' : '')));
+    appendPositionBadges(left, p, state.next);
     li.appendChild(left);
+
+    const right = document.createElement('span');
+    right.className = 'row-controls';
     if (p.isHost) {
       const tag = document.createElement('span');
       tag.className = 'host-tag';
       tag.textContent = 'HOST';
-      li.appendChild(tag);
+      right.appendChild(tag);
     }
+    if (amHost()) {
+      right.appendChild(seatControls(p));
+      if (p.id !== myId()) right.appendChild(kickButton(p));
+    }
+    li.appendChild(right);
     ul.appendChild(li);
   }
   const canStart = amHost() && state.players.length >= 2;
@@ -206,6 +341,7 @@ function renderLobby() {
   $('lobby-start-btn').textContent =
     state.players.length >= 2 ? 'Start first hand' : 'Waiting for players…';
   $('lobby-wait').classList.toggle('hidden', amHost());
+  $('lobby-help').classList.toggle('hidden', !amHost());
 }
 
 function renderTable() {
@@ -224,7 +360,7 @@ function renderTable() {
     prompt = state.ranOut
       ? 'All-in! Deal out the rest of the board, then compare hands.'
       : 'Showdown — reveal your hands!';
-  } else if (state.stage === 'hand_over') prompt = 'Hand complete.';
+  } else if (state.stage === 'hand_over') prompt = 'Hand complete. Badges show next hand’s positions.';
   $('dealer-prompt').textContent = prompt;
 
   renderPlayers(betting);
@@ -232,7 +368,48 @@ function renderTable() {
   renderHostForce(betting);
   renderShowdown();
   renderHandOver();
+  renderScoreboard();
+  renderHostSettings();
   renderLog();
+}
+
+function renderScoreboard() {
+  const el = $('scoreboard');
+  el.innerHTML = '';
+  const table = document.createElement('table');
+  const head = table.insertRow();
+  for (const h of ['Player', 'Buy-in', 'Stack', 'Net', 'Wins']) {
+    const th = document.createElement('th');
+    th.textContent = h;
+    head.appendChild(th);
+  }
+  const rows = [...state.players]
+    .map((p) => ({ ...p, stack: p.chips + p.totalCommitted, net: p.chips + p.totalCommitted - p.buyIn }))
+    .sort((a, b) => b.net - a.net);
+  for (const p of rows) {
+    const tr = table.insertRow();
+    tr.insertCell().textContent = p.name;
+    tr.insertCell().textContent = p.buyIn;
+    tr.insertCell().textContent = p.stack;
+    const net = tr.insertCell();
+    net.textContent = p.net > 0 ? `+${p.net}` : p.net;
+    if (p.net > 0) net.className = 'net-pos';
+    if (p.net < 0) net.className = 'net-neg';
+    tr.insertCell().textContent = p.handsWon;
+  }
+  el.appendChild(table);
+}
+
+function renderHostSettings() {
+  const panel = $('host-settings');
+  panel.classList.toggle('hidden', !amHost());
+  if (!amHost()) return;
+  // Don't clobber the host's typing while the panel is open.
+  if (!panel.open) {
+    $('live-sb').value = state.settings.smallBlind;
+    $('live-bb').value = state.settings.bigBlind;
+    $('live-timer').value = String(state.settings.turnTimer);
+  }
 }
 
 function renderPlayers(betting) {
@@ -251,9 +428,16 @@ function renderPlayers(betting) {
     dot.title = p.connected ? 'online' : 'offline';
     who.appendChild(dot);
     who.appendChild(document.createTextNode(p.name));
-    if (p.id === state.dealerId) who.appendChild(badge('D', 'd'));
-    if (p.id === state.sbId) who.appendChild(badge('SB', 'sb'));
-    if (p.id === state.bbId) who.appendChild(badge('BB', 'bb'));
+    if (p.isHost) {
+      const crown = document.createElement('span');
+      crown.className = 'host-tag';
+      crown.textContent = '♛';
+      crown.title = 'Host';
+      who.appendChild(crown);
+    }
+    // Between hands the badges preview the NEXT hand's positions.
+    appendPositionBadges(who, p, state.next || state);
+    if (state.stage === 'hand_over' && amHost()) who.appendChild(seatControls(p));
 
     const stack = document.createElement('div');
     stack.className = 'p-stack';
@@ -261,17 +445,27 @@ function renderPlayers(betting) {
 
     const status = document.createElement('div');
     status.className = 'p-status';
-    if (p.id === state.actorId) status.textContent = 'to act…';
-    else if (betting && !p.inHand && p.lastAction) status.textContent = 'folded';
+    if (p.id === state.actorId) {
+      status.textContent = 'to act…';
+      if (state.actorDeadline) status.appendChild(countdownSpan());
+    } else if (betting && !p.inHand && p.lastAction) status.textContent = 'folded';
     else status.textContent = p.lastAction || (p.chips === 0 && !p.inHand ? 'busted' : '');
 
     const bet = document.createElement('div');
     bet.className = 'p-bet';
     bet.textContent = p.betThisRound > 0 ? `bet ${p.betThisRound}` : '';
 
+    if (state.stage === 'hand_over' && amHost() && p.id !== myId()) who.appendChild(kickButton(p));
     li.append(who, stack, status, bet);
     ul.appendChild(li);
   }
+}
+
+function appendPositionBadges(el, p, pos) {
+  if (!pos) return;
+  if (p.id === pos.dealerId) el.appendChild(badge('D', 'd'));
+  if (p.id === pos.sbId) el.appendChild(badge('SB', 'sb'));
+  if (p.id === pos.bbId) el.appendChild(badge('BB', 'bb'));
 }
 
 function badge(text, cls) {
@@ -288,13 +482,20 @@ function renderActionBar(me, betting) {
 
   if (betting && !myTurn) {
     const actor = state.players.find((p) => p.id === state.actorId);
-    $('wait-note').textContent = actor
-      ? `Waiting for ${actor.name}…`
-      : 'Waiting…';
+    const note = $('wait-note');
+    note.textContent = actor ? `Waiting for ${actor.name}…` : 'Waiting…';
+    if (actor && state.actorDeadline) note.appendChild(countdownSpan());
   }
   if (!myTurn) {
     raiseOpen = false;
     return;
+  }
+
+  const timerNote = $('timer-note');
+  timerNote.classList.toggle('hidden', !state.actorDeadline);
+  if (state.actorDeadline) {
+    timerNote.textContent = 'Your turn —';
+    timerNote.appendChild(countdownSpan());
   }
 
   const toCall = state.currentBet - me.betThisRound;

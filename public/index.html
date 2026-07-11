@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <button id="theme-btn" class="theme-btn" title="Switch theme">◐ Auto</button>
   <div id="app">
 
     <!-- ============ HOME ============ -->
@@ -36,6 +37,16 @@
           <label>Starting stack <input id="set-stack" type="number" value="1000" min="1" /></label>
           <label>Small blind <input id="set-sb" type="number" value="5" min="1" /></label>
           <label>Big blind <input id="set-bb" type="number" value="10" min="1" /></label>
+          <label>Turn timer
+            <select id="set-timer">
+              <option value="0" selected>Off</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+              <option value="45">45s</option>
+              <option value="60">60s</option>
+              <option value="90">90s</option>
+            </select>
+          </label>
         </div>
         <button id="create-btn" class="btn primary wide">Create game</button>
       </div>
@@ -56,6 +67,12 @@
       <div class="card">
         <h2>Players</h2>
         <ul id="lobby-players" class="lobby-list"></ul>
+        <p id="lobby-help" class="hint help-note hidden">
+          <b>↑ ↓</b> arrange seats to match your table.
+          <b>D</b> gives that player the dealer button — the small and big
+          blinds are always the next two seats, and everything rotates
+          automatically each hand. <b>♛</b> makes them host, <b>✕</b> removes them.
+        </p>
       </div>
       <button id="lobby-start-btn" class="btn primary wide hidden">Start first hand</button>
       <p id="lobby-wait" class="hint center hidden">Waiting for the host to start…</p>
@@ -80,6 +97,7 @@
 
       <!-- betting actions -->
       <div id="action-bar" class="action-bar hidden">
+        <div id="timer-note" class="timer-note hidden"></div>
         <div id="raise-panel" class="raise-panel hidden">
           <div class="raise-row">
             <input id="raise-slider" type="range" />
@@ -127,6 +145,31 @@
         <button id="next-hand-btn" class="btn primary wide hidden">Start next hand</button>
         <div id="rebuy-area"></div>
       </div>
+
+      <details class="card" id="scoreboard-card">
+        <summary>Scoreboard</summary>
+        <div id="scoreboard"></div>
+      </details>
+
+      <details class="card hidden" id="host-settings">
+        <summary>Game settings</summary>
+        <div class="settings-grid">
+          <label>Small blind <input id="live-sb" type="number" min="1" /></label>
+          <label>Big blind <input id="live-bb" type="number" min="1" /></label>
+          <label>Turn timer
+            <select id="live-timer">
+              <option value="0">Off</option>
+              <option value="15">15s</option>
+              <option value="30">30s</option>
+              <option value="45">45s</option>
+              <option value="60">60s</option>
+              <option value="90">90s</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">Blind changes apply from the next hand. The timer applies right away — turn it off for a break.</p>
+        <button id="apply-settings" class="btn primary wide">Apply</button>
+      </details>
 
       <div class="card">
         <h2>Game log</h2>

@@ -207,6 +207,112 @@ test('busted player is not dealt in; rebuy restores them', () => {
   assert.equal(b.chips, 1000);
 });
 
+test('host can kick between hands, not mid-hand, and not non-hosts', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  assert.throws(() => G.kickPlayer(game, b.id, c.id), /Only the host/);
+  G.startHand(game, a.id);
+  assert.throws(() => G.kickPlayer(game, a.id, c.id), /between hands/);
+  G.applyAction(game, a.id, { type: 'fold' });
+  G.applyAction(game, b.id, { type: 'fold' });
+  assert.equal(game.stage, 'hand_over');
+  G.kickPlayer(game, a.id, c.id);
+  assert.equal(game.players.length, 2);
+  assert.ok(!byName(game, 'C'));
+});
+
+test('timeout checks when free, folds when facing a bet', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  G.startHand(game, a.id);
+  G.applyAction(game, a.id, { type: 'call' });
+  G.applyAction(game, b.id, { type: 'call' });
+  G.timeoutAction(game); // C (BB) can check
+  assert.ok(c.inHand);
+  assert.equal(game.stage, 'flop');
+  G.applyAction(game, b.id, { type: 'raise', amount: 50 });
+  G.timeoutAction(game); // C faces a bet — folds
+  assert.ok(!c.inHand);
+});
+
+test('host can change blinds mid-game; applies next hand', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b] = ['A', 'B'].map((n) => byName(game, n));
+  G.startHand(game, a.id);
+  assert.throws(() => G.updateSettings(game, b.id, { smallBlind: 10 }), /Only the host/);
+  assert.throws(
+    () => G.updateSettings(game, a.id, { smallBlind: 50, bigBlind: 20 }),
+    /at least the small blind/
+  );
+  G.updateSettings(game, a.id, { smallBlind: 10, bigBlind: 20, turnTimer: 30 });
+  assert.equal(game.currentBet, 10); // current hand unaffected
+  assert.equal(game.settings.turnTimer, 30);
+  // fold out and start the next hand with new blinds
+  G.applyAction(game, a.id, { type: 'fold' });
+  G.applyAction(game, b.id, { type: 'fold' });
+  G.startHand(game, a.id);
+  assert.equal(game.currentBet, 20);
+});
+
+test('scoreboard stats: buy-ins and hands won', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  G.startHand(game, a.id);
+  G.applyAction(game, a.id, { type: 'fold' });
+  G.applyAction(game, b.id, { type: 'fold' });
+  assert.equal(c.handsWon, 1);
+  assert.equal(a.handsWon, 0);
+  c.chips = 0;
+  G.rebuy(game, a.id, c.id);
+  assert.equal(c.buyIn, 2000);
+  assert.equal(a.buyIn, 1000);
+});
+
+test('host can reorder seats between hands', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  assert.throws(() => G.movePlayer(game, b.id, c.id, -1), /Only the host/);
+  G.movePlayer(game, a.id, c.id, -1); // C up: A, C, B
+  assert.deepEqual(game.players.map((p) => p.name), ['A', 'C', 'B']);
+  G.movePlayer(game, a.id, a.id, -1); // A already at top: no-op
+  assert.deepEqual(game.players.map((p) => p.name), ['A', 'C', 'B']);
+  G.startHand(game, a.id);
+  assert.throws(() => G.movePlayer(game, a.id, c.id, 1), /between hands/);
+  // new order drives the blinds: A dealer, C SB, B BB
+  assert.equal(game.sbId, c.id);
+  assert.equal(game.bbId, b.id);
+});
+
+test('host can assign the button; rotation continues from there', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  G.setNextDealer(game, a.id, c.id);
+  G.startHand(game, a.id);
+  assert.equal(game.dealerId, c.id);
+  assert.equal(game.sbId, a.id); // seat after C wraps to A
+  assert.equal(game.bbId, b.id);
+  // override is one-shot: next hand rotates normally from C
+  const first = actor(game);
+  G.applyAction(game, first.id, { type: 'fold' });
+  G.applyAction(game, actor(game).id, { type: 'fold' });
+  assert.equal(game.stage, 'hand_over');
+  G.startHand(game, a.id);
+  assert.equal(game.dealerId, a.id);
+});
+
+test('host transfer, and default fallback when host leaves', () => {
+  const { game } = setup(['A', 'B', 'C']);
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  assert.throws(() => G.transferHost(game, b.id, c.id), /Only the host/);
+  G.transferHost(game, a.id, c.id);
+  assert.ok(c.isHost && !a.isHost);
+  assert.ok(G.isActingHost(game, c.id));
+  assert.ok(!G.isActingHost(game, a.id));
+  // C (now host) leaves without picking — hosting falls back to first seat
+  G.leaveGame(game, c.id);
+  assert.ok(byName(game, 'A').isHost);
+});
+
 test('turn order rejects out-of-turn actions', () => {
   const { game } = setup(['A', 'B', 'C']);
   G.startHand(game, byName(game, 'A').id);

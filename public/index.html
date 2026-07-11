@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>PokerPal — virtual chips for real cards</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ============ HOME ============ -->
+    <section id="screen-home" class="screen">
+      <header class="brand">
+        <h1>Poker<span>Pal</span></h1>
+        <p class="tagline">Real cards. Virtual chips.</p>
+      </header>
+
+      <div class="card">
+        <label for="name-input">Your name</label>
+        <input id="name-input" maxlength="20" placeholder="e.g. Charlie" autocomplete="off" />
+      </div>
+
+      <div class="card">
+        <h2>Join a game</h2>
+        <div class="row">
+          <input id="code-input" maxlength="4" placeholder="CODE" autocomplete="off"
+                 autocapitalize="characters" class="code-input" />
+          <button id="join-btn" class="btn primary">Join</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Host a new game</h2>
+        <div class="settings-grid">
+          <label>Starting stack <input id="set-stack" type="number" value="1000" min="1" /></label>
+          <label>Small blind <input id="set-sb" type="number" value="5" min="1" /></label>
+          <label>Big blind <input id="set-bb" type="number" value="10" min="1" /></label>
+        </div>
+        <button id="create-btn" class="btn primary wide">Create game</button>
+      </div>
+
+      <p id="home-error" class="error hidden"></p>
+    </section>
+
+    <!-- ============ LOBBY ============ -->
+    <section id="screen-lobby" class="screen hidden">
+      <header class="brand small">
+        <h1>Poker<span>Pal</span></h1>
+      </header>
+      <div class="card center">
+        <p class="hint">Share this code with the table:</p>
+        <div id="lobby-code" class="game-code">----</div>
+        <p id="lobby-settings" class="hint"></p>
+      </div>
+      <div class="card">
+        <h2>Players</h2>
+        <ul id="lobby-players" class="lobby-list"></ul>
+      </div>
+      <button id="lobby-start-btn" class="btn primary wide hidden">Start first hand</button>
+      <p id="lobby-wait" class="hint center hidden">Waiting for the host to start…</p>
+      <button id="lobby-leave-btn" class="btn ghost wide">Leave game</button>
+    </section>
+
+    <!-- ============ TABLE ============ -->
+    <section id="screen-table" class="screen hidden">
+      <div class="table-top">
+        <div class="table-meta">
+          <span id="table-code" class="chip-label"></span>
+          <span id="table-hand" class="chip-label"></span>
+        </div>
+        <div class="pot-display">
+          <div class="pot-amount" id="pot-amount">0</div>
+          <div class="pot-label">POT</div>
+        </div>
+        <div id="dealer-prompt" class="dealer-prompt"></div>
+      </div>
+
+      <ul id="player-list" class="player-list"></ul>
+
+      <!-- betting actions -->
+      <div id="action-bar" class="action-bar hidden">
+        <div id="raise-panel" class="raise-panel hidden">
+          <div class="raise-row">
+            <input id="raise-slider" type="range" />
+            <input id="raise-amount" type="number" inputmode="numeric" />
+          </div>
+          <div class="raise-presets">
+            <button class="btn small" id="raise-min">Min</button>
+            <button class="btn small" id="raise-pot">Pot</button>
+            <button class="btn small" id="raise-allin">All-in</button>
+          </div>
+          <div class="row">
+            <button id="raise-cancel" class="btn ghost">Back</button>
+            <button id="raise-confirm" class="btn raise">Raise</button>
+          </div>
+        </div>
+        <div id="action-buttons" class="action-buttons">
+          <button id="btn-fold" class="btn fold">Fold</button>
+          <button id="btn-check-call" class="btn call">Check</button>
+          <button id="btn-raise" class="btn raise">Raise</button>
+        </div>
+      </div>
+
+      <div id="wait-note" class="wait-note hidden"></div>
+
+      <!-- host: act for a disconnected player -->
+      <div id="host-force" class="card hidden">
+        <p class="hint" id="host-force-note"></p>
+        <div class="row">
+          <button id="host-force-check" class="btn small">Check for them</button>
+          <button id="host-force-fold" class="btn small fold">Fold for them</button>
+        </div>
+      </div>
+
+      <!-- showdown: award pots -->
+      <div id="showdown-panel" class="card hidden">
+        <h2>Award the pot</h2>
+        <p class="hint" id="showdown-hint"></p>
+        <div id="pot-award-area"></div>
+      </div>
+
+      <!-- hand over -->
+      <div id="handover-panel" class="card hidden">
+        <h2>Hand complete</h2>
+        <div id="hand-result"></div>
+        <button id="next-hand-btn" class="btn primary wide hidden">Start next hand</button>
+        <div id="rebuy-area"></div>
+      </div>
+
+      <div class="card">
+        <h2>Game log</h2>
+        <ul id="game-log" class="log-list"></ul>
+      </div>
+      <button id="table-leave-btn" class="btn ghost wide">Leave game</button>
+    </section>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

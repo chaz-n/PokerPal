@@ -1,0 +1,17 @@
+{
+  "name": "pokerpal",
+  "version": "0.1.0",
+  "description": "Virtual chips and pot management for physical poker games",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}

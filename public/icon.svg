@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- felt background, safe for maskable icons (content within center 80%) -->
+  <rect width="512" height="512" rx="96" fill="#1a5c3a"/>
+  <circle cx="256" cy="256" r="150" fill="#c8686b"/>
+  <circle cx="256" cy="256" r="118" fill="none" stroke="#ffffff" stroke-width="14"
+          stroke-dasharray="30 32" stroke-linecap="butt"/>
+  <circle cx="256" cy="256" r="74" fill="#b25457"/>
+</svg>

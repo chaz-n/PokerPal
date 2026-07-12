@@ -4,6 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
   <title>PokerPal — virtual chips for real cards</title>
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -33,6 +38,20 @@
       <div class="card">
         <h2>Host a new game</h2>
         <div class="settings-grid">
+          <label>Game type
+            <select id="set-mode">
+              <option value="cash" selected>Cash game</option>
+              <option value="tournament">Tournament</option>
+            </select>
+          </label>
+          <label id="level-length-label" class="hidden">Level length
+            <select id="set-level-minutes">
+              <option value="10">10 min</option>
+              <option value="15" selected>15 min</option>
+              <option value="20">20 min</option>
+              <option value="30">30 min</option>
+            </select>
+          </label>
           <label>Starting stack <input id="set-stack" type="number" value="1000" min="1" /></label>
           <label>Small blind <input id="set-sb" type="number" value="5" min="1" /></label>
           <label>Big blind <input id="set-bb" type="number" value="10" min="1" /></label>
@@ -47,10 +66,57 @@
             </select>
           </label>
         </div>
+        <details id="more-options">
+          <summary class="hint">More options — money, antes, straddles, league</summary>
+          <div class="settings-grid">
+            <label>Currency
+              <select id="set-currency">
+                <option value="" selected>Chips only</option>
+                <option value="£">£ pounds</option>
+                <option value="$">$ dollars</option>
+                <option value="€">€ euros</option>
+              </select>
+            </label>
+            <label>Chip value <input id="set-chip-value" type="number" value="" min="0" step="0.01" placeholder="e.g. 0.05" /></label>
+            <label>Ante <input id="set-ante" type="number" value="0" min="0" /></label>
+            <label class="check-label">Allow straddles
+              <input id="set-straddle" type="checkbox" />
+            </label>
+          </div>
+          <label>League code (optional — attaches tonight to your league)
+            <input id="set-league" maxlength="6" placeholder="e.g. KWXRTM" autocapitalize="characters" autocomplete="off" />
+          </label>
+        </details>
         <button id="create-btn" class="btn primary wide">Create game</button>
       </div>
 
+      <div class="card">
+        <h2>League leaderboard</h2>
+        <div class="row">
+          <input id="league-input" maxlength="6" placeholder="LEAGUE CODE" autocomplete="off"
+                 autocapitalize="characters" class="code-input" />
+          <button id="league-view-btn" class="btn">View</button>
+        </div>
+      </div>
+
       <p id="home-error" class="error hidden"></p>
+    </section>
+
+    <!-- ============ LEAGUE ============ -->
+    <section id="screen-league" class="screen hidden">
+      <header class="brand small">
+        <h1>PokerPal</h1>
+      </header>
+      <div class="card">
+        <h2 id="league-title">League</h2>
+        <p class="hint" id="league-meta"></p>
+        <div id="league-board"></div>
+      </div>
+      <div class="card">
+        <h2>Recent nights</h2>
+        <div id="league-nights"></div>
+      </div>
+      <button id="league-back-btn" class="btn ghost wide">Back</button>
     </section>
 
     <!-- ============ LOBBY ============ -->
@@ -61,8 +127,11 @@
       <div class="card center">
         <p class="hint">Share this code with the table:</p>
         <div id="lobby-code" class="game-code">----</div>
+        <div id="lobby-qr" class="qr-box"></div>
+        <p class="hint">…or let them scan to join.</p>
         <p id="lobby-settings" class="hint"></p>
       </div>
+      <div id="lobby-straddle-area"></div>
       <div class="card">
         <h2>Players</h2>
         <ul id="lobby-players" class="lobby-list"></ul>
@@ -85,6 +154,7 @@
           <span id="table-code" class="chip-label"></span>
           <span id="table-hand" class="chip-label"></span>
         </div>
+        <div id="level-note" class="level-note hidden"></div>
         <div class="pot-display">
           <div class="pot-amount" id="pot-amount">0</div>
           <div class="pot-label">POT</div>
@@ -142,6 +212,7 @@
         <h2>Hand complete</h2>
         <div id="hand-result"></div>
         <button id="next-hand-btn" class="btn primary wide hidden">Start next hand</button>
+        <div id="straddle-area"></div>
         <div id="rebuy-area"></div>
       </div>
 
@@ -150,11 +221,63 @@
         <div id="scoreboard"></div>
       </details>
 
+      <details class="card hidden" id="payouts-card">
+        <summary>Tournament payouts</summary>
+        <div id="payouts"></div>
+      </details>
+
+      <details class="card" id="settle-card">
+        <summary>Settle up</summary>
+        <p class="hint" id="settle-hint"></p>
+        <ul id="settle-list" class="settle-list"></ul>
+        <div id="league-panel" class="hidden">
+          <div class="rebuy-row"><span class="hint" id="league-status"></span></div>
+          <div id="league-host-controls" class="hidden">
+            <div class="row">
+              <input id="league-attach-input" maxlength="6" placeholder="LEAGUE CODE" autocapitalize="characters" autocomplete="off" />
+              <button id="league-attach-btn" class="btn small">Attach</button>
+            </div>
+            <div class="row" style="margin-top: 8px;">
+              <input id="league-create-input" maxlength="40" placeholder="New league name" autocomplete="off" />
+              <button id="league-create-btn" class="btn small">Create</button>
+            </div>
+          </div>
+          <button id="league-save-btn" class="btn primary wide hidden">Save night to league</button>
+          <button id="league-open-btn" class="btn ghost wide hidden">View leaderboard</button>
+        </div>
+        <!--
+          TODO(donations): drop a real donation link here once one exists, e.g.
+          <p class="hint center">Enjoying PokerPal? <a href="https://ko-fi.com/YOUR_PAGE">Buy us a coffee ☕</a></p>
+          The settle-up screen is where the night wraps up — friendliest moment to ask.
+        -->
+      </details>
+
+      <details class="card" id="cheatsheet-card">
+        <summary>What beats what?</summary>
+        <ol class="cheat-list">
+          <li><b>Royal flush</b> <span>A K Q J 10, same suit</span></li>
+          <li><b>Straight flush</b> <span>5 in a row, same suit</span></li>
+          <li><b>Four of a kind</b> <span>Q Q Q Q 7</span></li>
+          <li><b>Full house</b> <span>J J J 8 8</span></li>
+          <li><b>Flush</b> <span>5 cards, same suit</span></li>
+          <li><b>Straight</b> <span>5 in a row, mixed suits</span></li>
+          <li><b>Three of a kind</b> <span>9 9 9 K 4</span></li>
+          <li><b>Two pair</b> <span>A A 6 6 3</span></li>
+          <li><b>One pair</b> <span>10 10 K 7 2</span></li>
+          <li><b>High card</b> <span>none of the above</span></li>
+        </ol>
+        <p class="hint">Ties: compare the highest card that differs. Suits never break ties — equal hands split the pot.</p>
+      </details>
+
       <details class="card hidden" id="host-settings">
         <summary>Game settings</summary>
         <div class="settings-grid">
           <label>Small blind <input id="live-sb" type="number" min="1" /></label>
           <label>Big blind <input id="live-bb" type="number" min="1" /></label>
+          <label>Ante <input id="live-ante" type="number" min="0" /></label>
+          <label class="check-label">Allow straddles
+            <input id="live-straddle" type="checkbox" />
+          </label>
           <label>Turn timer
             <select id="live-timer">
               <option value="0">Off</option>
@@ -166,8 +289,9 @@
             </select>
           </label>
         </div>
-        <p class="hint">Blind changes apply from the next hand. The timer applies right away — turn it off for a break.</p>
+        <p class="hint">Blind and ante changes apply from the next hand. The timer applies right away — turn it off for a break.</p>
         <button id="apply-settings" class="btn primary wide">Apply</button>
+        <button id="pause-level-btn" class="btn wide hidden">Pause level clock (break)</button>
       </details>
 
       <div class="card">
@@ -181,6 +305,7 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="vendor/qrcode.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

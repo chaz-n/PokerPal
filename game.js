@@ -4,6 +4,7 @@
 const crypto = require('crypto');
 
 const STAGES = ['preflop', 'flop', 'turn', 'river'];
+const CURRENCIES = ['$', '£', '€'];
 
 const STAGE_PROMPTS = {
   preflop: 'Deal 2 cards to each player.',
@@ -33,6 +34,12 @@ function createGame(hostName, settings = {}) {
       smallBlind: clampInt(settings.smallBlind, 1, 100000, 5),
       bigBlind: clampInt(settings.bigBlind, 1, 200000, 10),
       turnTimer: clampInt(settings.turnTimer, 0, 300, 0), // seconds; 0 = off
+      ante: clampInt(settings.ante, 0, 100000, 0),
+      allowStraddle: !!settings.allowStraddle,
+      currency: CURRENCIES.includes(settings.currency) ? settings.currency : '',
+      chipValue: clampMoney(settings.chipValue), // money per chip; 0 = chips only
+      mode: settings.mode === 'tournament' ? 'tournament' : 'cash',
+      levelMinutes: clampInt(settings.levelMinutes, 1, 120, 15),
     },
     players: [],
     stage: 'lobby', // lobby | preflop | flop | turn | river | showdown | hand_over
@@ -47,10 +54,18 @@ function createGame(hostName, settings = {}) {
     pots: null, // computed at showdown: [{amount, eligibleIds, awarded, winners}]
     handResult: null, // summary lines for the last completed hand
     ranOut: false, // betting finished early, board must be run out
+    biggestPot: 0,
+    // tournament clock (mode: 'tournament' only)
+    level: 1,
+    levelEndsAt: null, // ms timestamp; null until the first hand starts (or while paused)
+    levelPausedMs: null, // remaining ms while on break
     log: [],
   };
   if (game.settings.bigBlind < game.settings.smallBlind) {
     game.settings.bigBlind = game.settings.smallBlind * 2;
+  }
+  if (game.settings.mode === 'tournament') {
+    game.schedule = buildSchedule(game.settings.smallBlind, game.settings.bigBlind);
   }
   const host = addPlayer(game, hostName, true);
   return { game, player: host };
@@ -72,6 +87,7 @@ function addPlayer(game, name, isHost = false) {
     buyIn: game.settings.startingStack,
     handsWon: 0,
     connected: true,
+    straddleNext: false,
     // per-hand state
     inHand: false,
     allIn: false,
@@ -92,6 +108,33 @@ function clampInt(v, min, max, dflt) {
   const n = Math.floor(Number(v));
   if (!Number.isFinite(n)) return dflt;
   return Math.max(min, Math.min(max, n));
+}
+
+// Money per chip, kept to whole minor units (cents/pence) so settle-up math
+// stays exact integers. 0 disables money display.
+function clampMoney(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(100000, Math.round(n * 100) / 100);
+}
+
+// Tournament blind schedule: escalate ~1.5× per level, rounded up to "nice"
+// chip numbers. Level 1 is the host's chosen blinds.
+function buildSchedule(smallBlind, bigBlind, count = 24) {
+  const levels = [{ smallBlind, bigBlind }];
+  let sb = smallBlind;
+  while (levels.length < count) {
+    sb = niceCeil(sb * 1.5);
+    levels.push({ smallBlind: sb, bigBlind: sb * 2 });
+  }
+  return levels;
+}
+
+function niceCeil(n) {
+  const mag = Math.pow(10, Math.floor(Math.log10(n)));
+  const m = n / mag;
+  const nice = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((x) => x >= m - 1e-9);
+  return Math.round(nice * mag);
 }
 
 function touch(game) {
@@ -181,7 +224,9 @@ function nextPositions(game) {
     sb = nextAfterId(game, dealer.id, isEligible);
     bb = nextAfterId(game, sb.id, isEligible);
   }
-  return { dealerId: dealer.id, sbId: sb.id, bbId: bb.id };
+  // UTG can straddle (3+ players only — no straddling heads-up).
+  const utg = eligible.length >= 3 ? nextAfterId(game, bb.id, isEligible) : null;
+  return { dealerId: dealer.id, sbId: sb.id, bbId: bb.id, utgId: utg ? utg.id : null };
 }
 
 function startHand(game, playerId) {
@@ -215,6 +260,15 @@ function startHand(game, playerId) {
   const bb = getPlayer(game, pos.bbId);
   game.sbId = sb.id;
   game.bbId = bb.id;
+
+  // Antes go straight to the pot — they don't count toward calling a bet,
+  // so the per-round tally is cleared after posting.
+  const ante = game.settings.ante;
+  if (ante > 0) {
+    for (const p of game.players) if (p.inHand) pay(game, p, ante);
+    for (const p of game.players) p.betThisRound = 0;
+  }
+
   pay(game, sb, game.settings.smallBlind);
   pay(game, bb, game.settings.bigBlind);
   sb.lastAction = `SB ${sb.betThisRound}`;
@@ -224,14 +278,37 @@ function startHand(game, playerId) {
   game.currentBet = game.settings.bigBlind;
   game.minRaise = game.settings.bigBlind;
 
-  const first = nextAfterId(game, bb.id, canAct);
-  game.actorId = first ? first.id : null;
-
   log(
     game,
     `Hand #${game.handNumber} — ${dealer.name} has the button. ` +
-      `${sb.name} posts SB ${game.settings.smallBlind}, ${bb.name} posts BB ${game.settings.bigBlind}.`
+      `${sb.name} posts SB ${game.settings.smallBlind}, ${bb.name} posts BB ${game.settings.bigBlind}.` +
+      (ante > 0 ? ` Everyone antes ${ante}.` : '')
   );
+
+  // Straddle: the UTG player may post a live 2×BB blind; action then starts
+  // on their left and they get the option, like a third blind.
+  let straddler = null;
+  const utg = pos.utgId ? getPlayer(game, pos.utgId) : null;
+  if (game.settings.allowStraddle && utg && utg.straddleNext && canAct(utg)) {
+    const target = game.settings.bigBlind * 2;
+    pay(game, utg, target);
+    utg.lastAction = utg.allIn ? `All-in ${utg.betThisRound}` : `Straddle ${utg.betThisRound}`;
+    game.currentBet = Math.max(game.currentBet, utg.betThisRound);
+    // A full straddle doubles the price of a min-raise (to 2× the straddle).
+    if (utg.betThisRound === target) game.minRaise = target;
+    straddler = utg;
+    log(game, `${utg.name} straddles ${utg.betThisRound}.`);
+  }
+  for (const p of game.players) p.straddleNext = false;
+
+  const first = nextAfterId(game, (straddler || bb).id, canAct);
+  game.actorId = first ? first.id : null;
+
+  // Tournament: the level clock starts with the first hand.
+  if (game.settings.mode === 'tournament' && !game.levelEndsAt && game.levelPausedMs == null) {
+    game.levelEndsAt = Date.now() + game.settings.levelMinutes * 60 * 1000;
+    log(game, `Level ${game.level} — ${game.settings.levelMinutes} minutes per level.`);
+  }
   touch(game);
 
   if (!game.actorId || !someoneCanRespond(game)) {
@@ -320,6 +397,7 @@ function resolveAfterAction(game) {
     // Everyone else folded — no showdown needed.
     const winner = remaining[0];
     const amount = potTotal(game);
+    game.biggestPot = Math.max(game.biggestPot, amount);
     winner.chips += amount;
     winner.handsWon += 1;
     game.handResult = [`${winner.name} wins ${amount} — everyone else folded.`];
@@ -372,6 +450,7 @@ function finishBettingRound(game) {
 
 function goToShowdown(game) {
   game.stage = 'showdown';
+  game.biggestPot = Math.max(game.biggestPot, potTotal(game));
   game.pots = computePots(game);
   if (game.ranOut) {
     log(game, 'No more betting possible. Deal out the rest of the board, then compare hands.');
@@ -488,6 +567,107 @@ function endHand(game) {
   log(game, 'Hand complete. Host can start the next hand.');
 }
 
+// ---------------------------------------------------------------- straddle
+
+// Any player can pre-commit to straddling; it only takes effect if they turn
+// out to be UTG when the hand starts (and straddling is enabled).
+function setStraddle(game, playerId, on) {
+  if (!game.settings.allowStraddle) throw new GameError('Straddling is not enabled in this game.');
+  if (game.stage !== 'lobby' && game.stage !== 'hand_over') {
+    throw new GameError('You can only straddle between hands.');
+  }
+  const player = getPlayer(game, playerId);
+  if (!player) throw new GameError('Player not found.');
+  if (player.chips <= 0) throw new GameError('You have no chips to straddle with.');
+  player.straddleNext = !!on;
+  touch(game);
+  return game;
+}
+
+// ---------------------------------------------------------------- tournament
+
+function scheduleLevel(game, level) {
+  return game.schedule[Math.min(level - 1, game.schedule.length - 1)];
+}
+
+// Called by the server when the level clock runs out.
+function advanceLevel(game) {
+  if (game.settings.mode !== 'tournament' || !game.levelEndsAt) return game;
+  game.level += 1;
+  const lv = scheduleLevel(game, game.level);
+  game.settings.smallBlind = lv.smallBlind;
+  game.settings.bigBlind = lv.bigBlind;
+  game.levelEndsAt = Date.now() + game.settings.levelMinutes * 60 * 1000;
+  const midHand = isBettingStage(game) || game.stage === 'showdown';
+  log(
+    game,
+    `Level ${game.level} — blinds are now ${lv.smallBlind}/${lv.bigBlind}${midHand ? ' (from the next hand)' : ''}.`
+  );
+  touch(game);
+  return game;
+}
+
+// Break time: pause freezes the remaining level time, resume restores it.
+function setTournamentPaused(game, playerId, paused) {
+  if (!isActingHost(game, playerId)) throw new GameError('Only the host can pause the clock.');
+  if (game.settings.mode !== 'tournament') throw new GameError('This is not a tournament.');
+  if (paused) {
+    if (!game.levelEndsAt) return game; // not started or already paused
+    game.levelPausedMs = Math.max(0, game.levelEndsAt - Date.now());
+    game.levelEndsAt = null;
+    log(game, 'Tournament clock paused — on break.');
+  } else {
+    if (game.levelPausedMs == null) return game;
+    game.levelEndsAt = Date.now() + game.levelPausedMs;
+    game.levelPausedMs = null;
+    log(game, 'Break over — tournament clock running.');
+  }
+  touch(game);
+  return game;
+}
+
+// Suggested payout split for the prize pool (host settles up physically).
+function payouts(game) {
+  const entries = Math.round(
+    game.players.reduce((s, p) => s + p.buyIn, 0) / game.settings.startingStack
+  );
+  const pool = game.players.reduce((s, p) => s + p.buyIn, 0);
+  const n = game.players.length;
+  const split = n >= 8 ? [0.5, 0.3, 0.2] : n >= 5 ? [0.65, 0.35] : [1];
+  let remaining = pool;
+  const places = split.map((pct, i) => {
+    const chips = i === split.length - 1 ? remaining : Math.round(pool * pct);
+    remaining -= chips;
+    return { place: i + 1, pct, chips };
+  });
+  return { entries, pool, places };
+}
+
+// ---------------------------------------------------------------- settle up
+
+// Minimal payments so everyone's net win/loss is settled, largest debts
+// matched to largest wins first (at most players-1 transfers).
+function settleTransfers(game) {
+  const nets = game.players.map((p) => ({
+    id: p.id,
+    net: p.chips + p.totalCommitted - p.buyIn,
+  }));
+  const creditors = nets.filter((n) => n.net > 0).sort((a, b) => b.net - a.net);
+  const debtors = nets.filter((n) => n.net < 0).sort((a, b) => a.net - b.net);
+  const transfers = [];
+  let i = 0;
+  let j = 0;
+  while (i < debtors.length && j < creditors.length) {
+    const amount = Math.min(-debtors[i].net, creditors[j].net);
+    transfers.push({ fromId: debtors[i].id, toId: creditors[j].id, chips: amount });
+    debtors[i].net += amount;
+    creditors[j].net -= amount;
+    if (debtors[i].net === 0) i++;
+    if (creditors[j].net === 0) j++;
+  }
+  return transfers;
+}
+
 // ---------------------------------------------------------------- misc
 
 function rebuy(game, playerId, targetId) {
@@ -512,16 +692,28 @@ function updateSettings(game, playerId, patch = {}) {
   const smallBlind = clampInt(patch.smallBlind, 1, 100000, s.smallBlind);
   const bigBlind = clampInt(patch.bigBlind, 1, 200000, s.bigBlind);
   const turnTimer = clampInt(patch.turnTimer, 0, 300, s.turnTimer);
+  const ante = clampInt(patch.ante, 0, 100000, s.ante);
+  const allowStraddle = patch.allowStraddle === undefined ? s.allowStraddle : !!patch.allowStraddle;
   if (bigBlind < smallBlind) throw new GameError('Big blind must be at least the small blind.');
 
   const blindsChanged = smallBlind !== s.smallBlind || bigBlind !== s.bigBlind;
   const timerChanged = turnTimer !== s.turnTimer;
+  const anteChanged = ante !== s.ante;
+  const straddleChanged = allowStraddle !== s.allowStraddle;
   s.smallBlind = smallBlind;
   s.bigBlind = bigBlind;
   s.turnTimer = turnTimer;
+  s.ante = ante;
+  s.allowStraddle = allowStraddle;
+  const midHand = game.stage !== 'lobby' && game.stage !== 'hand_over';
   if (blindsChanged) {
-    const midHand = game.stage !== 'lobby' && game.stage !== 'hand_over';
     log(game, `Blinds are now ${smallBlind}/${bigBlind}${midHand ? ' (from the next hand)' : ''}.`);
+  }
+  if (anteChanged) {
+    log(game, ante ? `Ante set to ${ante}${midHand ? ' (from the next hand)' : ''}.` : 'Ante removed.');
+  }
+  if (straddleChanged) {
+    log(game, allowStraddle ? 'Straddling is now allowed.' : 'Straddling turned off.');
   }
   if (timerChanged) {
     log(game, turnTimer ? `Turn timer set to ${turnTimer}s.` : 'Turn timer turned off.');
@@ -623,6 +815,20 @@ function publicState(game) {
     pots: game.pots,
     handResult: game.handResult,
     prompt: isBettingStage(game) ? STAGE_PROMPTS[game.stage] : null,
+    biggestPot: game.biggestPot,
+    // money display (0/empty = chips only)
+    currency: game.settings.currency,
+    valueMinor: Math.round(game.settings.chipValue * 100),
+    settle: settleTransfers(game),
+    // tournament clock
+    level: game.settings.mode === 'tournament' ? game.level : null,
+    levelEndsAt: game.levelEndsAt,
+    levelPaused: game.levelPausedMs != null,
+    nextLevel:
+      game.settings.mode === 'tournament' ? scheduleLevel(game, game.level + 1) : null,
+    payouts: game.settings.mode === 'tournament' ? payouts(game) : null,
+    leagueCode: game.leagueCode || null,
+    leagueName: game.leagueName || null,
     actingHostId:
       game.players.find((p) => p.isHost && p.connected)?.id ??
       game.players.find((p) => p.connected)?.id ??
@@ -640,6 +846,7 @@ function publicState(game) {
       betThisRound: p.betThisRound,
       totalCommitted: p.totalCommitted,
       lastAction: p.lastAction,
+      straddleNext: p.straddleNext,
     })),
     log: game.log.slice(-40),
   };
@@ -656,6 +863,12 @@ module.exports = {
   awardPot,
   rebuy,
   updateSettings,
+  setStraddle,
+  advanceLevel,
+  setTournamentPaused,
+  payouts,
+  settleTransfers,
+  buildSchedule,
   transferHost,
   movePlayer,
   setNextDealer,
@@ -664,4 +877,5 @@ module.exports = {
   publicState,
   isActingHost,
   isBettingStage,
+  log,
 };

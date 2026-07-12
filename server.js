@@ -3,12 +3,20 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const G = require('./game');
+const store = require('./store');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+// League leaderboard (read-only, no secrets — codes are shared within a group).
+app.get('/api/league/:code', (req, res) => {
+  const league = store.summary(req.params.code);
+  if (!league) return res.status(404).json({ error: 'League not found.' });
+  res.json(league);
+});
 
 const games = new Map(); // code -> game
 const MAX_GAMES = 500;
@@ -25,7 +33,33 @@ function removeGame(code) {
   const timer = timers.get(code);
   if (timer) clearTimeout(timer.handle);
   timers.delete(code);
+  const level = levelTimers.get(code);
+  if (level) clearTimeout(level.handle);
+  levelTimers.delete(code);
   games.delete(code);
+}
+
+// --- tournament level clock (server-side, like the turn timer) ---
+const levelTimers = new Map(); // code -> {key, handle}
+
+function armLevelTimer(game) {
+  const key = `${game.level}:${game.levelEndsAt}`;
+  const current = levelTimers.get(game.code);
+  if (current && current.key === key) return;
+  if (current) clearTimeout(current.handle);
+  levelTimers.delete(game.code);
+
+  if (!game.levelEndsAt) return; // cash game, paused, or not started
+  const handle = setTimeout(() => {
+    levelTimers.delete(game.code);
+    try {
+      G.advanceLevel(game);
+    } catch (err) {
+      console.error(err);
+    }
+    broadcast(game);
+  }, Math.max(0, game.levelEndsAt - Date.now()) + 250);
+  levelTimers.set(game.code, { key, handle });
 }
 
 // --- turn timer (runs server-side so it fires even if every phone is locked) ---
@@ -93,6 +127,7 @@ function room(code) {
 
 function broadcast(game) {
   armTimer(game);
+  armLevelTimer(game);
   io.to(room(game.code)).emit('state', G.publicState(game));
 }
 
@@ -108,7 +143,7 @@ function safe(socket, fn) {
     try {
       fn(...args);
     } catch (err) {
-      if (err instanceof G.GameError) {
+      if (err instanceof G.GameError || err instanceof store.StoreError) {
         socket.emit('game_error', { message: err.message });
       } else {
         console.error(err);
@@ -128,10 +163,16 @@ function currentGame(socket) {
 io.on('connection', (socket) => {
   socket.on(
     'create',
-    safe(socket, ({ name, settings } = {}) => {
+    safe(socket, ({ name, settings, leagueCode } = {}) => {
       rateLimit(socket, 'create', 6, 10 * 60 * 1000);
       if (games.size >= MAX_GAMES) throw new G.GameError('Server is full right now — try again later.');
       const { game, player } = G.createGame(name, settings || {});
+      if (leagueCode) {
+        const league = store.getLeague(leagueCode);
+        if (!league) throw new G.GameError('No league found with that code.');
+        game.leagueCode = league.code;
+        game.leagueName = league.name;
+      }
       games.set(game.code, game);
       bind(socket, game, player);
       socket.emit('joined', { code: game.code, playerId: player.id, token: player.token });
@@ -262,6 +303,82 @@ io.on('connection', (socket) => {
     safe(socket, (patch = {}) => {
       const { game, player } = currentGame(socket);
       G.updateSettings(game, player.id, patch);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'set_straddle',
+    safe(socket, ({ on } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.setStraddle(game, player.id, on);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'tournament_pause',
+    safe(socket, ({ paused } = {}) => {
+      const { game, player } = currentGame(socket);
+      G.setTournamentPaused(game, player.id, !!paused);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'league_create',
+    safe(socket, ({ name } = {}) => {
+      const { game, player } = currentGame(socket);
+      if (!G.isActingHost(game, player.id)) throw new G.GameError('Only the host can create a league.');
+      rateLimit(socket, 'league_create', 4, 10 * 60 * 1000);
+      const league = store.createLeague(name);
+      game.leagueCode = league.code;
+      game.leagueName = league.name;
+      G.log(game, `This game is now part of league ${league.name} (${league.code}).`);
+      broadcast(game);
+    })
+  );
+
+  socket.on(
+    'league_attach',
+    safe(socket, ({ code } = {}) => {
+      const { game, player } = currentGame(socket);
+      if (!G.isActingHost(game, player.id)) throw new G.GameError('Only the host can attach a league.');
+      rateLimit(socket, 'league_attach', 15, 60 * 1000);
+      const league = store.getLeague(code);
+      if (!league) throw new G.GameError('No league found with that code.');
+      game.leagueCode = league.code;
+      game.leagueName = league.name;
+      G.log(game, `This game is now part of league ${league.name} (${league.code}).`);
+      broadcast(game);
+    })
+  );
+
+  // Save (or update) tonight's results into the league. Host-only, between hands.
+  socket.on(
+    'league_save',
+    safe(socket, () => {
+      const { game, player } = currentGame(socket);
+      if (!G.isActingHost(game, player.id)) throw new G.GameError('Only the host can save the night.');
+      if (!game.leagueCode) throw new G.GameError('This game is not attached to a league.');
+      if (G.isBettingStage(game) || game.stage === 'showdown') {
+        throw new G.GameError('Save the night between hands.');
+      }
+      store.saveNight(game.leagueCode, {
+        savedAt: Date.now(),
+        gameCode: game.code,
+        currency: game.settings.currency,
+        valueMinor: Math.round(game.settings.chipValue * 100),
+        biggestPot: game.biggestPot,
+        results: game.players.map((p) => ({
+          name: p.name,
+          buyIn: p.buyIn,
+          stack: p.chips,
+          net: p.chips - p.buyIn,
+          handsWon: p.handsWon,
+        })),
+      });
+      G.log(game, `Night saved to league ${game.leagueName}.`);
       broadcast(game);
     })
   );

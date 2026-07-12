@@ -20,11 +20,35 @@ Extras: reconnect support (rejoin automatically after a dropped connection),
 host rebuys for busted players, host can fold/check for a disconnected player
 or remove someone between hands, and a full action log.
 
+- **Real money & settle-up:** the host can pick a currency (£/$/€) and a chip
+  value (e.g. 1 chip = £0.05). The Settle up card then shows the *fewest*
+  payments that square everyone's night — "Dave pays Sarah £12.40" — updated
+  live. Without a chip value it settles in chips.
+- **Leagues (persistent):** create a league and share its 6-letter code; each
+  night the host hits "Save night" and the all-time leaderboard (net, nights,
+  hands won) builds up across games. Anyone can view it from the home screen
+  with the league code. Stored server-side in `data/leagues.json`
+  (`DATA_DIR` env var to relocate — put it on a persistent volume when
+  deploying).
+- **Tournament mode:** pick a level length and blinds escalate automatically
+  on a server-side clock (~1.5× per level, rounded to nice numbers, applied
+  from the next hand). The host can pause the clock for breaks, and a payouts
+  card suggests the classic split for the prize pool (top 1/2/3 places by
+  player count).
+- **Antes & straddles:** optional ante posted by everyone each hand, and
+  opt-in UTG straddles (2×BB live blind; min-raise doubles; 3+ players).
+- **QR join:** the lobby shows a QR code — friends scan it instead of typing
+  the game code.
+- **Installable (PWA):** add it to your home screen and it opens like an app.
+  Needs HTTPS.
+- **Hand-rank cheat sheet:** a collapsible "what beats what" card on the
+  table screen for the friend who always asks.
 - **Turn timer (optional):** off by default; auto-checks or folds when time
   runs out. The host can change or disable it mid-game (e.g. for a break).
-- **Live settings:** the host can change the blinds at any time — they apply
-  from the next hand.
-- **Scoreboard:** buy-ins, current stacks, net win/loss, and hands won.
+- **Live settings:** the host can change blinds, antes, and straddle rules at
+  any time — they apply from the next hand.
+- **Scoreboard:** buy-ins, current stacks, net win/loss (in money too, when a
+  chip value is set), and hands won.
 - **Light/dark theme:** follows the device by default (nice for playing
   outside), with a manual override toggle.
 
@@ -41,8 +65,10 @@ LAN IP, e.g. `http://192.168.1.20:3000`) or any Node host on the internet.
 
 ## Deploying publicly
 
-State lives in a single Node process's memory, so run **exactly one instance**
-(no load balancing) — which is also the cheapest setup. Two good options:
+Game state lives in a single Node process's memory, so run **exactly one
+instance** (no load balancing) — which is also the cheapest setup. League
+history is the only thing persisted to disk (`data/leagues.json`); point
+`DATA_DIR` at a volume that survives redeploys. Two good options:
 
 - **PaaS (easiest):** Fly.io, Railway, or Render. Connect the repo, they build
   and run `npm start`, and you get HTTPS automatically. Note that a redeploy
@@ -78,5 +104,6 @@ npm test
 ```
 
 Covers blind posting, turn order, min-raise rules, side pots, split pots,
-heads-up play, and a 200-hand randomized simulation asserting chips are never
-created or destroyed.
+heads-up play, antes, straddles, settle-up transfers, tournament levels and
+payouts, the league store, and randomized simulations (200 plain hands plus
+150 with antes and straddles) asserting chips are never created or destroyed.

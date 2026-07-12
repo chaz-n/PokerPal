@@ -369,4 +369,276 @@ test('chip conservation across many random hands', () => {
   }
 });
 
+// ------------------------------------------------------------------ antes
+
+test('antes go to the pot and do not count toward calling', () => {
+  const { game } = setup(['A', 'B', 'C'], { startingStack: 1000, smallBlind: 5, bigBlind: 10, ante: 2 });
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  G.startHand(game, a.id);
+  // 3 antes + SB + BB in the pot; betThisRound only reflects blinds
+  assert.equal(a.totalCommitted, 2);
+  assert.equal(a.betThisRound, 0);
+  assert.equal(b.betThisRound, 5);
+  assert.equal(c.betThisRound, 10);
+  assert.equal(game.currentBet, 10);
+  // A (UTG) must call the full BB, not BB minus ante
+  G.applyAction(game, a.id, { type: 'call' });
+  assert.equal(a.totalCommitted, 12);
+  G.applyAction(game, b.id, { type: 'fold' });
+  G.applyAction(game, c.id, { type: 'check' });
+  assert.equal(game.stage, 'flop');
+  assert.equal(chipsTotal(game), 3000);
+});
+
+test('ante can put a short stack all-in', () => {
+  const { game } = setup(['A', 'B', 'C'], { startingStack: 1000, smallBlind: 5, bigBlind: 10, ante: 5 });
+  const [a, b, c] = ['A', 'B', 'C'].map((n) => byName(game, n));
+  a.chips = 3; // can't cover the ante
+  G.startHand(game, a.id);
+  assert.ok(a.allIn);
+  assert.equal(a.totalCommitted, 3);
+  assert.ok(a.inHand);
+});
+
+// ------------------------------------------------------------------ straddle
+
+function straddleSetup() {
+  const { game } = setup(['A', 'B', 'C', 'D'], {
+    startingStack: 1000, smallBlind: 5, bigBlind: 10, allowStraddle: true,
+  });
+  return { game, ...Object.fromEntries(['a', 'b', 'c', 'd'].map((k, i) => [k, game.players[i]])) };
+}
+
+test('straddle posts 2xBB, action starts after straddler, straddler has option', () => {
+  const { game, a, b, c, d } = straddleSetup();
+  // A dealer, B SB, C BB, D UTG
+  G.setStraddle(game, d.id, true);
+  G.startHand(game, a.id);
+  assert.equal(d.betThisRound, 20);
+  assert.equal(game.currentBet, 20);
+  assert.equal(actor(game).id, a.id); // action starts left of the straddler
+  G.applyAction(game, a.id, { type: 'call' });
+  G.applyAction(game, b.id, { type: 'call' });
+  G.applyAction(game, c.id, { type: 'call' });
+  // straddler still gets the option
+  assert.equal(game.stage, 'preflop');
+  assert.equal(actor(game).id, d.id);
+  G.applyAction(game, d.id, { type: 'check' });
+  assert.equal(game.stage, 'flop');
+  assert.equal(chipsTotal(game), 4000);
+});
+
+test('min raise over a straddle is to 2x the straddle', () => {
+  const { game, a, d } = straddleSetup();
+  G.setStraddle(game, d.id, true);
+  G.startHand(game, a.id);
+  assert.throws(() => G.applyAction(game, a.id, { type: 'raise', amount: 30 }), /Minimum raise/);
+  G.applyAction(game, a.id, { type: 'raise', amount: 40 });
+  assert.equal(game.currentBet, 40);
+});
+
+test('straddle is one-shot and requires the setting', () => {
+  const { game, a, b, c, d } = straddleSetup();
+  G.setStraddle(game, d.id, true);
+  G.startHand(game, a.id);
+  for (const p of [a, b, c]) G.applyAction(game, p.id, { type: 'fold' });
+  assert.equal(game.stage, 'hand_over');
+  // next hand: nobody re-straddled, so no straddle
+  G.startHand(game, a.id);
+  assert.equal(game.currentBet, 10);
+  assert.ok(game.players.every((p) => !p.straddleNext));
+
+  const plain = setup(['X', 'Y', 'Z']).game;
+  assert.throws(() => G.setStraddle(plain, plain.players[0].id, true), /not enabled/);
+});
+
+test('straddle only applies to the actual UTG player', () => {
+  const { game, a, b, c, d } = straddleSetup();
+  G.setStraddle(game, b.id, true); // B will be SB, not UTG
+  G.startHand(game, a.id);
+  assert.equal(b.betThisRound, 5); // just the SB — no straddle
+  assert.equal(game.currentBet, 10);
+});
+
+// ------------------------------------------------------------------ settle up
+
+test('settle-up produces minimal zero-sum transfers', () => {
+  const { game } = setup(['A', 'B', 'C', 'D']);
+  const [a, b, c, d] = ['A', 'B', 'C', 'D'].map((n) => byName(game, n));
+  // fake final stacks: A +500, B -300, C -350, D +150
+  a.chips = 1500; b.chips = 700; c.chips = 650; d.chips = 1150;
+  const transfers = G.settleTransfers(game);
+  assert.ok(transfers.length <= 3);
+  const nets = new Map(game.players.map((p) => [p.id, 0]));
+  for (const t of transfers) {
+    assert.ok(t.chips > 0);
+    nets.set(t.fromId, nets.get(t.fromId) - t.chips);
+    nets.set(t.toId, nets.get(t.toId) + t.chips);
+  }
+  // applying the transfers settles everyone exactly
+  assert.equal(nets.get(a.id), 500);
+  assert.equal(nets.get(b.id), -300);
+  assert.equal(nets.get(c.id), -350);
+  assert.equal(nets.get(d.id), 150);
+});
+
+test('settle-up is empty when everyone is even', () => {
+  const { game } = setup(['A', 'B']);
+  assert.deepEqual(G.settleTransfers(game), []);
+});
+
+// ------------------------------------------------------------------ tournament
+
+test('blind schedule escalates to nice numbers', () => {
+  const levels = G.buildSchedule(5, 10, 8);
+  assert.deepEqual(levels[0], { smallBlind: 5, bigBlind: 10 });
+  for (let i = 1; i < levels.length; i++) {
+    assert.ok(levels[i].smallBlind > levels[i - 1].smallBlind, `level ${i} must escalate`);
+    assert.equal(levels[i].bigBlind, levels[i].smallBlind * 2);
+  }
+});
+
+test('advancing a level raises the blinds for the next hand', () => {
+  const { game } = setup(['A', 'B', 'C'], {
+    startingStack: 1000, smallBlind: 5, bigBlind: 10, mode: 'tournament', levelMinutes: 15,
+  });
+  const [a, b] = ['A', 'B'].map((n) => byName(game, n));
+  assert.equal(game.levelEndsAt, null); // clock hasn't started
+  G.startHand(game, a.id);
+  assert.ok(game.levelEndsAt > Date.now());
+  G.advanceLevel(game);
+  assert.equal(game.level, 2);
+  assert.ok(game.settings.bigBlind > 10);
+  assert.equal(game.currentBet, 10); // current hand unaffected
+  G.applyAction(game, actor(game).id, { type: 'fold' });
+  G.applyAction(game, actor(game).id, { type: 'fold' });
+  G.startHand(game, a.id);
+  assert.equal(game.currentBet, game.settings.bigBlind);
+});
+
+test('pause freezes the level clock; resume restores it', () => {
+  const { game } = setup(['A', 'B'], {
+    startingStack: 1000, smallBlind: 5, bigBlind: 10, mode: 'tournament', levelMinutes: 15,
+  });
+  const a = byName(game, 'A');
+  G.startHand(game, a.id);
+  G.setTournamentPaused(game, a.id, true);
+  assert.equal(game.levelEndsAt, null);
+  assert.ok(game.levelPausedMs > 0);
+  G.advanceLevel(game); // no-op while paused
+  assert.equal(game.level, 1);
+  G.setTournamentPaused(game, a.id, false);
+  assert.ok(game.levelEndsAt > Date.now());
+});
+
+test('payout suggestions split the pool by player count', () => {
+  const { game } = setup(['A', 'B', 'C', 'D', 'E'], {
+    startingStack: 1000, smallBlind: 5, bigBlind: 10, mode: 'tournament',
+  });
+  const p = G.payouts(game);
+  assert.equal(p.entries, 5);
+  assert.equal(p.pool, 5000);
+  assert.equal(p.places.length, 2); // 5-7 players pay two places
+  assert.equal(p.places.reduce((s, x) => s + x.chips, 0), 5000);
+});
+
+// ------------------------------------------------------------------ league store
+
+test('league store: create, save nights, aggregate leaderboard', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pokerpal-test-'));
+  const store = require('./store');
+
+  const league = store.createLeague('Thursday Crew');
+  assert.equal(league.code.length, 6);
+  assert.throws(() => store.createLeague('  '), /name/);
+
+  const night = (gameCode, aNet, bNet) => ({
+    savedAt: Date.now(),
+    gameCode,
+    currency: '£',
+    valueMinor: 5, // 1 chip = £0.05
+    biggestPot: 400,
+    results: [
+      { name: 'Alice', buyIn: 1000, stack: 1000 + aNet, net: aNet, handsWon: 3 },
+      { name: 'bob', buyIn: 1000, stack: 1000 + bNet, net: bNet, handsWon: 1 },
+    ],
+  });
+  store.saveNight(league.code, night('AAAA', 200, -200));
+  store.saveNight(league.code, night('BBBB', -100, 100));
+  // re-saving the same game replaces the night instead of duplicating it
+  store.saveNight(league.code, night('BBBB', -150, 150));
+
+  const sum = store.summary(league.code);
+  assert.equal(sum.nights.length, 2);
+  assert.ok(sum.moneyOk);
+  assert.equal(sum.currency, '£');
+  const alice = sum.players.find((p) => p.name === 'Alice');
+  assert.equal(alice.nights, 2);
+  assert.equal(alice.netChips, 50);
+  assert.equal(alice.netMinor, 250); // £2.50
+  assert.equal(alice.handsWon, 6);
+  assert.equal(store.summary('NOPE'), null);
+});
+
+// ------------------------------------------------------------------ sim with antes + straddles
+
+test('chip conservation with antes and straddles', () => {
+  const { game } = setup(['A', 'B', 'C', 'D'], {
+    startingStack: 1000, smallBlind: 5, bigBlind: 10, ante: 3, allowStraddle: true,
+  });
+  const host = byName(game, 'A');
+  let rngState = 7;
+  const rng = () => {
+    rngState = (rngState * 1103515245 + 12345) % 2147483648;
+    return rngState / 2147483648;
+  };
+  for (let hand = 0; hand < 150; hand++) {
+    for (const p of game.players) if (p.chips === 0) G.rebuy(game, host.id, p.id);
+    if (rng() < 0.4) {
+      const nxt = game.stage === 'lobby' || game.stage === 'hand_over' ? game : null;
+      const candidates = game.players.filter((p) => p.chips > 0);
+      const pick = candidates[Math.floor(rng() * candidates.length)];
+      if (pick) G.setStraddle(game, pick.id, true);
+    }
+    G.startHand(game, host.id);
+    let guard = 0;
+    while (G.isBettingStage(game) && guard++ < 200) {
+      const p = G.getPlayer(game, game.actorId);
+      const toCall = game.currentBet - p.betThisRound;
+      const r = rng();
+      try {
+        if (r < 0.2 && toCall > 0) G.applyAction(game, p.id, { type: 'fold' });
+        else if (r < 0.75) G.applyAction(game, p.id, { type: toCall > 0 ? 'call' : 'check' });
+        else {
+          const maxTo = p.betThisRound + p.chips;
+          const minTo = Math.min(game.currentBet + game.minRaise, maxTo);
+          const to = minTo + Math.floor(rng() * (maxTo - minTo + 1));
+          G.applyAction(game, p.id, { type: 'raise', amount: to });
+        }
+      } catch (e) {
+        G.applyAction(game, p.id, { type: toCall > 0 ? 'call' : 'check' });
+      }
+    }
+    if (game.stage === 'showdown') {
+      for (let i = 0; i < game.pots.length; i++) {
+        const pot = game.pots[i];
+        if (pot.awarded) continue;
+        const winner = pot.eligibleIds[Math.floor(rng() * pot.eligibleIds.length)];
+        G.awardPot(game, host.id, i, [winner]);
+      }
+    }
+    assert.equal(game.stage, 'hand_over', `hand ${hand} did not finish (stage=${game.stage})`);
+    const total = game.players.reduce((s, p) => s + p.chips, 0);
+    assert.ok(total % 1000 === 0, `chips leaked on hand ${hand}: total=${total}`);
+    // settle transfers always zero-sum, even mid-session
+    const t = G.settleTransfers(game);
+    const out = t.reduce((s, x) => s + x.chips, 0);
+    const inn = t.reduce((s, x) => s + x.chips, 0);
+    assert.equal(out, inn);
+  }
+});
+
 console.log(`\n${passed} tests passed`);

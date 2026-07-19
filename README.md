@@ -1,6 +1,6 @@
-# PokerPal
+# CountChip
 
-Virtual chips for real cards. You've got a deck but no chips — PokerPal runs the
+Virtual chips for real cards. You've got a deck but no chips — CountChip runs the
 pot on everyone's phones while the cards stay physical.
 
 ## How it works

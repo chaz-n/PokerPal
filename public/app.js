@@ -22,7 +22,7 @@ let raiseOpen = false;
 
 function loadSession() {
   try {
-    return JSON.parse(localStorage.getItem('pokerpal-session')) || null;
+    return JSON.parse(localStorage.getItem('countchip-session')) || null;
   } catch {
     return null;
   }
@@ -30,8 +30,8 @@ function loadSession() {
 
 function saveSession(s) {
   session = s;
-  if (s) localStorage.setItem('pokerpal-session', JSON.stringify(s));
-  else localStorage.removeItem('pokerpal-session');
+  if (s) localStorage.setItem('countchip-session', JSON.stringify(s));
+  else localStorage.removeItem('countchip-session');
 }
 
 // ---------------------------------------------------------------- socket
@@ -75,7 +75,7 @@ socket.on('game_error', ({ message }) => toast(message));
 // ---------------------------------------------------------------- theme
 
 const THEME_LABELS = { auto: '◐ Auto', light: '☀ Light', dark: '● Dark' };
-let theme = localStorage.getItem('pokerpal-theme') || 'auto';
+let theme = localStorage.getItem('countchip-theme') || 'auto';
 
 function applyTheme() {
   if (theme === 'auto') document.documentElement.removeAttribute('data-theme');
@@ -86,19 +86,19 @@ function applyTheme() {
 $('theme-btn').addEventListener('click', () => {
   const order = ['auto', 'light', 'dark'];
   theme = order[(order.indexOf(theme) + 1) % order.length];
-  localStorage.setItem('pokerpal-theme', theme);
+  localStorage.setItem('countchip-theme', theme);
   applyTheme();
 });
 applyTheme();
 
-const savedName = localStorage.getItem('pokerpal-name');
+const savedName = localStorage.getItem('countchip-name');
 if (savedName) $('name-input').value = savedName;
 const urlCode = new URLSearchParams(location.search).get('code');
 if (urlCode) $('code-input').value = urlCode.toUpperCase();
 
 function myName() {
   const name = $('name-input').value.trim();
-  localStorage.setItem('pokerpal-name', name);
+  localStorage.setItem('countchip-name', name);
   return name;
 }
 
@@ -287,7 +287,7 @@ function turnAlert() {
   const myTurn = state.actorId != null && state.actorId === myId();
   if (myTurn && !wasMyTurn && navigator.vibrate) navigator.vibrate([150, 75, 150]);
   wasMyTurn = myTurn;
-  document.title = myTurn ? '● Your turn — PokerPal' : 'PokerPal — virtual chips for real cards';
+  document.title = myTurn ? '● Your turn — CountChip' : 'CountChip — virtual chips for real cards';
 }
 
 // Keep the screen on during a game (needs HTTPS; silently unavailable otherwise).

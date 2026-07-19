@@ -1,5 +1,5 @@
 {
-  "name": "pokerpal",
+  "name": "countchip",
   "version": "0.1.0",
   "description": "Virtual chips and pot management for physical poker games",
   "main": "server.js",

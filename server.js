@@ -412,5 +412,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`PokerPal running at http://localhost:${PORT}`);
+  console.log(`CountChip running at http://localhost:${PORT}`);
 });

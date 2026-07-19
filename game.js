@@ -1,4 +1,4 @@
-// PokerPal game engine — chips/betting only, cards stay physical.
+// CountChip game engine — chips/betting only, cards stay physical.
 // Texas Hold'em betting structure: blinds, four streets, side pots.
 
 const crypto = require('crypto');

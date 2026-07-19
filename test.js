@@ -548,7 +548,7 @@ test('league store: create, save nights, aggregate leaderboard', () => {
   const fs = require('fs');
   const os = require('os');
   const path = require('path');
-  process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pokerpal-test-'));
+  process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'countchip-test-'));
   const store = require('./store');
 
   const league = store.createLeague('Thursday Crew');

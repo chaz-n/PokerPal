@@ -1,6 +1,6 @@
 {
-  "name": "PokerPal",
-  "short_name": "PokerPal",
+  "name": "CountChip",
+  "short_name": "CountChip",
   "description": "Virtual chips for real cards — run the pot on everyone's phones.",
   "start_url": "/",
   "display": "standalone",

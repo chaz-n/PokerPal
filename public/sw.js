@@ -1,7 +1,7 @@
-// Minimal service worker: lets PokerPal install as an app and load its shell
+// Minimal service worker: lets CountChip install as an app and load its shell
 // instantly. Game state is live over WebSockets, so everything dynamic goes
 // network-first — the cache is only a fallback for the static shell.
-const CACHE = 'pokerpal-v1';
+const CACHE = 'countchip-v1';
 const SHELL = ['/', '/style.css', '/app.js', '/vendor/qrcode.js', '/icon.svg', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {

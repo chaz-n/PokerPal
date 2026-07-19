@@ -1,0 +1,10 @@
+node_modules
+data
+.git
+.claude
+.env
+*.log
+test.js
+README.md
+nginx/certbot-etc
+nginx/certbot-www

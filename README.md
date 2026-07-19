@@ -73,15 +73,28 @@ history is the only thing persisted to disk (`data/leagues.json`); point
 - **PaaS (easiest):** Fly.io, Railway, or Render. Connect the repo, they build
   and run `npm start`, and you get HTTPS automatically. Note that a redeploy
   or instance restart wipes in-progress games.
-- **VPS (~$5/mo):** any small box (Hetzner, DigitalOcean, etc.). Run the app
-  under systemd or pm2 and put [Caddy](https://caddyserver.com) in front for
-  automatic HTTPS — it proxies WebSockets out of the box:
+- **VPS (~$5/mo):** any small box (Hetzner, DigitalOcean, etc.). Two options:
+  - Run the app under systemd or pm2 and put [Caddy](https://caddyserver.com)
+    in front for automatic HTTPS — it proxies WebSockets out of the box:
 
-  ```
-  poker.example.com {
-      reverse_proxy localhost:3000
-  }
-  ```
+    ```
+    poker.example.com {
+        reverse_proxy localhost:3000
+    }
+    ```
+  - Or use the bundled Docker setup (`Dockerfile` + `docker-compose.yml`),
+    which runs the app, nginx (reverse proxy + TLS termination), and certbot
+    (Let's Encrypt, auto-renewing) as three containers:
+
+    ```sh
+    cp .env.example .env   # set DOMAIN and EMAIL
+    ./init-letsencrypt.sh  # one-time: bootstraps the first certificate
+    docker compose up -d   # app + nginx + certbot renewal loop
+    ```
+
+    Point the domain's A/AAAA record at the VPS before running
+    `init-letsencrypt.sh` — Let's Encrypt needs to reach it on port 80. League
+    data persists in the `app-data` volume across restarts/redeploys.
 
 HTTPS matters beyond hygiene: the wake-lock and vibration features only work
 on secure origins. When running behind a reverse proxy, set `TRUST_PROXY=1` so
